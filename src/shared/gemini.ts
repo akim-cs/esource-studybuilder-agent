@@ -4,7 +4,7 @@
 import { GoogleGenAI, createPartFromBase64, createPartFromText } from '@google/genai'
 import type { PageState, UIControl } from './types'
 
-const MODEL = 'gemini-2.0-flash'
+const MODEL = 'gemini-2.5-flash'
 
 // 15 RPM free tier = 1 call per 4 s minimum. We use 4.5 s to stay safe.
 const MIN_CALL_INTERVAL_MS = 4500

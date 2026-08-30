@@ -13,7 +13,7 @@ A Chrome MV3 extension that replaces manual clinical trial study-building in eSo
 | Extension type | Chrome MV3 | Required | — |
 | Language | TypeScript | Schema is the backbone; type errors at compile time, not at field 87 | Plain JS |
 | Bundler | Vite (HTML pages) + esbuild (scripts) | Vite handles React/HTML; esbuild gives IIFE for content script, ESM for background | vite-plugin-web-ext (quirky with Vite 5), Webpack |
-| LLM | **Gemini 2.0 Flash** via `@google/genai` | Free tier (1,500 req/day, 15 RPM); strong vision; no paid credits needed | Claude API (no credits), GPT-4o (no credits) |
+| LLM | **Gemini 2.5 Flash** via `@google/genai` | Free tier (1,500 req/day, 15 RPM); strong vision; no paid credits needed | Claude API (no credits), GPT-4o (no credits) |
 | UI perception | Screenshot + a11y tree | A11y tree alone is sparse; screenshot alone has coordinate fragility; combined is most reliable | Pure DOM selectors (auto-fail), Computer Use coords (fragile) |
 | Click targeting | Accessible name + role match | Layout-independent; survives resize/zoom | Hardcoded selectors (auto-fail), pixel coords |
 | Side panel | React (minimal) | Reactive escalation queue + live status | Vanilla JS |
@@ -115,7 +115,7 @@ Gemini returns `PageState`:
 |---|---|
 | **Screenshot** | A PNG image of whatever is visible in the eSource browser tab right now — how the agent "sees" the page. Captured via Chrome's `captureVisibleTab` API, encoded as base64. |
 | **Accessibility tree (a11y tree)** | A parallel text description of every interactive element on the page, the same data screen readers use. Gives us exact label text and element roles (`[button] "Add Visit"`, `[input] "Visit Name"`) without having to OCR the image. Extracted live from the DOM by the content script. |
-| **Gemini Vision** | Sending both the screenshot (image) and a11y tree (text) to Gemini 2.0 Flash together. Screenshot covers visual context and layout that the a11y tree misses; a11y tree covers exact labels that vision alone might misread. Together they're more reliable than either alone. |
+| **Gemini Vision** | Sending both the screenshot (image) and a11y tree (text) to Gemini 2.5 Flash together. Screenshot covers visual context and layout that the a11y tree misses; a11y tree covers exact labels that vision alone might misread. Together they're more reliable than either alone. |
 | **PageState** | The structured JSON output Gemini returns after analyzing the page: the screen name (`"visit list"`), a navigation breadcrumb, and a cleaned list of interactive controls with labels and positions. Every agent decision — what to click, whether a save succeeded — is made from a fresh `PageState`. |
 
 **Data flow:**
