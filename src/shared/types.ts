@@ -137,6 +137,7 @@ export interface RunState {
   status: 'idle' | 'running' | 'paused' | 'complete' | 'error';
   plan: BuildStep[];
   currentStepIndex: number;
+  targetTabId?: number;
   vocabularyMap?: VocabularyMap;
   escalationQueue: EscalationItem[];
   traceLog: TraceEntry[];
@@ -146,7 +147,7 @@ export interface RunState {
 // ── Extension messages ─────────────────────────────────────────────────────────
 
 export type ExtMessage =
-  | { type: 'START_RUN'; studyIR: StudyIR }
+  | { type: 'START_RUN'; studyIR: StudyIR; tabId: number }
   | { type: 'PAUSE_RUN' }
   | { type: 'RESUME_RUN' }
   | { type: 'ABORT_RUN' }

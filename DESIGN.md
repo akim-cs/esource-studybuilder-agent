@@ -109,6 +109,21 @@ Gemini returns `PageState`:
 }
 ```
 
+### Concept breakdown
+
+| Term | What it is |
+|---|---|
+| **Screenshot** | A PNG image of whatever is visible in the eSource browser tab right now — how the agent "sees" the page. Captured via Chrome's `captureVisibleTab` API, encoded as base64. |
+| **Accessibility tree (a11y tree)** | A parallel text description of every interactive element on the page, the same data screen readers use. Gives us exact label text and element roles (`[button] "Add Visit"`, `[input] "Visit Name"`) without having to OCR the image. Extracted live from the DOM by the content script. |
+| **Gemini Vision** | Sending both the screenshot (image) and a11y tree (text) to Gemini 2.0 Flash together. Screenshot covers visual context and layout that the a11y tree misses; a11y tree covers exact labels that vision alone might misread. Together they're more reliable than either alone. |
+| **PageState** | The structured JSON output Gemini returns after analyzing the page: the screen name (`"visit list"`), a navigation breadcrumb, and a cleaned list of interactive controls with labels and positions. Every agent decision — what to click, whether a save succeeded — is made from a fresh `PageState`. |
+
+**Data flow:**
+```
+eSource tab → captureVisibleTab()  → PNG (base64)  ─┐
+eSource tab → content script      → a11y tree (text) ─┤→ Gemini Vision → PageState
+```
+
 ---
 
 ## Vocabulary Discovery

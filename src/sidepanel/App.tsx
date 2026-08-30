@@ -33,10 +33,13 @@ export default function App() {
     const file = e.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       try {
         const studyIR = JSON.parse(ev.target?.result as string) as StudyIR
-        chrome.runtime.sendMessage({ type: 'START_RUN', studyIR } satisfies ExtMessage)
+        // Find the active tab in the current window to use as the target eSource tab
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+        if (!activeTab?.id) { alert('No active tab found — open the eSource platform first.'); return }
+        chrome.runtime.sendMessage({ type: 'START_RUN', studyIR, tabId: activeTab.id } satisfies ExtMessage)
       } catch {
         alert('Invalid JSON file')
       }

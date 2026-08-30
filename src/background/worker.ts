@@ -2,9 +2,9 @@
 // Receives commands from side panel, drives content script for perception + interaction,
 // calls Gemini for all LLM decisions, and writes state back to chrome.storage.local.
 
-import type { ExtMessage, RunState } from '../shared/types'
+import type { ExtMessage, RunState, PageState, UIControl } from '../shared/types'
 import { validateIR, createRunState, IRValidationError } from '../shared/planner'
-import { initGemini } from '../shared/gemini'
+import { initGemini, perceivePage } from '../shared/gemini'
 
 // ── Storage helpers ────────────────────────────────────────────────────────────
 
@@ -27,6 +27,29 @@ function broadcastState(runState: RunState): void {
 async function getApiKey(): Promise<string | null> {
   const { geminiApiKey } = await chrome.storage.local.get('geminiApiKey')
   return geminiApiKey ?? null
+}
+
+// ── Perception helpers ─────────────────────────────────────────────────────────
+
+async function captureScreenshot(tabId: number): Promise<string> {
+  const tab = await chrome.tabs.get(tabId)
+  // captureVisibleTab needs the window ID, not tab ID
+  return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' })
+}
+
+async function getA11yTree(tabId: number): Promise<UIControl[]> {
+  const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_PAGE_STATE' } satisfies ExtMessage)
+  const msg = response as { type: string; state: PageState }
+  return msg?.state?.controls ?? []
+}
+
+export async function captureAndPerceive(tabId: number): Promise<{ screenshot: string; pageState: PageState }> {
+  const [screenshot, a11yTree] = await Promise.all([
+    captureScreenshot(tabId),
+    getA11yTree(tabId),
+  ])
+  const pageState = await perceivePage(screenshot, a11yTree)
+  return { screenshot, pageState }
 }
 
 // ── Message routing ────────────────────────────────────────────────────────────
@@ -76,6 +99,7 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
 
       initGemini(apiKey)
       const runState = createRunState(ir)
+      runState.targetTabId = message.tabId
       await setState(runState)
 
       console.log(
