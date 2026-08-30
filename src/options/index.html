@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>StudyBuilder Options</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 32px; max-width: 480px; font-size: 14px; }
+    h2 { margin: 0 0 24px; }
+    label { display: block; margin-bottom: 6px; font-weight: 600; }
+    input[type="password"] { width: 100%; padding: 8px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+    button { padding: 8px 20px; cursor: pointer; }
+    #status { margin-top: 10px; color: green; }
+    .hint { font-size: 12px; color: #666; margin: -8px 0 12px; }
+  </style>
+</head>
+<body>
+  <h2>StudyBuilder Agent — Settings</h2>
+  <label for="apiKey">Gemini API Key</label>
+  <p class="hint">Get a free key at <a href="https://aistudio.google.com" target="_blank">aistudio.google.com</a> (no billing required)</p>
+  <input type="password" id="apiKey" placeholder="AIza…" autocomplete="off" />
+  <button id="save">Save</button>
+  <p id="status"></p>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

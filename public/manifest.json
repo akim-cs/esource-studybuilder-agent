@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "eSource StudyBuilder Agent",
+  "version": "0.1.0",
+  "description": "Autonomously builds clinical trial study structures in eSource platforms from a JSON spec.",
+  "permissions": ["activeTab", "storage", "scripting", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background/worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/index.js"]
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "options_ui": {
+    "page": "options/index.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "StudyBuilder Agent"
+  }
+}
