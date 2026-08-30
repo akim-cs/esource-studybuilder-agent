@@ -300,6 +300,24 @@ async function addField(tabId: number, step: BuildStep, vocabMap: VocabularyMap)
     await saveAndVerify(tabId, step.stepId, step.inputRef, `Skip logic rule saved for field "${field.label}"`)
   }
 
+  // ── Final read-back: confirm label AND type survived ─────────────────────
+  // Separate from saveAndVerify — this checks specific properties, not just that the UI changed.
+  const { screenshot: finalShot } = await captureAndPerceive(tabId)
+  const readBack = await verifyOutcome(
+    finalShot,
+    `The field list shows a field labeled exactly "${field.label}" with type "${platformType}"`,
+  )
+  if (!readBack.success && readBack.confidence >= 0.7) {
+    return {
+      outcome: 'escalated', action: 'addField:readBack', reasoning: readBack.reason,
+      escalation: {
+        id: `readback_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
+        issue: `Field "${field.label}" was created but read-back check failed: ${readBack.reason}`,
+        screenshot: finalShot, bestGuess: 'Field may have wrong label or type', confidence: readBack.confidence,
+      },
+    }
+  }
+
   return {
     outcome: 'success', action: 'addField',
     reasoning: `Created field "${field.label}" (${field.type} → ${platformType})`,

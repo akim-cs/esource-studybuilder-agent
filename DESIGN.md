@@ -193,11 +193,15 @@ The agent's hands. For every step: **perceive → Gemini picks control → inter
 - Verification fails (label/type mismatch after save)
 - Skip logic target field not found in the same form
 
-**Flow:**
-1. Push `EscalationItem` to `runState.escalationQueue`
-2. Background worker pauses execution
-3. Side panel renders escalation card (screenshot + issue + best guess)
-4. Human clicks Approve / Override / Skip → `RESOLVE_ESCALATION` message → background resumes
+**Flow:** worker pushes to `escalationQueue` → pauses → side panel shows one card at a time (screenshot + issue + best guess + confidence) → human clicks Approve / Override / Skip → worker resumes automatically when all pending items are resolved.
+
+**Vocab overrides** update the `VocabularyMap` immediately and re-cache by hostname so the correction applies to all remaining fields.
+
+### Traceability
+
+Every step appends a `TraceEntry` (`stepId`, `inputRef`, `action`, `reasoning`, `outcome`, `timestamp`) to `runState.traceLog`. The side panel's **Export Log** button downloads the full log as `trace-log.json`.
+
+**Read-back verification:** after `addField` completes all sub-steps, a final `verifyOutcome` call checks that the field list shows the exact label and type — separate from save confirmation, which only checks the UI changed.
 
 ---
 
