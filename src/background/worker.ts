@@ -2,9 +2,10 @@
 // Receives commands from side panel, drives content script for perception + interaction,
 // calls Gemini for all LLM decisions, and writes state back to chrome.storage.local.
 
-import type { ExtMessage, RunState, PageState, UIControl } from '../shared/types'
+import type { ExtMessage, RunState, PageState, UIControl, InteractAction, EscalationItem, VocabularyMap } from '../shared/types'
 import { validateIR, createRunState, IRValidationError } from '../shared/planner'
-import { initGemini, perceivePage } from '../shared/gemini'
+import { initGemini, perceivePage, discoverVocabulary, decideAction } from '../shared/gemini'
+import { loadCachedVocabulary, cacheVocabulary, buildVocabularyResult } from '../shared/vocabulary'
 
 // ── Storage helpers ────────────────────────────────────────────────────────────
 
@@ -50,6 +51,97 @@ export async function captureAndPerceive(tabId: number): Promise<{ screenshot: s
   ])
   const pageState = await perceivePage(screenshot, a11yTree)
   return { screenshot, pageState }
+}
+
+// ── Interaction helper ─────────────────────────────────────────────────────────
+
+async function sendInteract(tabId: number, action: InteractAction): Promise<boolean> {
+  const response = await chrome.tabs.sendMessage(tabId, { type: 'INTERACT', action } satisfies ExtMessage)
+  const result = response as { success: boolean; error?: string }
+  if (!result.success) {
+    console.warn('[worker] Interact failed:', result.error, action)
+  }
+  return result.success
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+// ── Vocabulary discovery flow ──────────────────────────────────────────────────
+// Navigates to the type picker on the current form page, screenshots it,
+// and builds the canonical → platform label mapping.
+// The caller must ensure we are already on a form's field list page.
+
+export async function runVocabularyDiscovery(
+  tabId: number,
+  hostname: string,
+): Promise<{ map: VocabularyMap; escalations: EscalationItem[] }> {
+  // Return cached map if already discovered for this platform
+  const cached = await loadCachedVocabulary(hostname)
+  if (cached) {
+    console.log('[worker] Vocabulary: using cached map for', hostname)
+    return { map: cached, escalations: [] }
+  }
+
+  console.log('[worker] Vocabulary: starting discovery for', hostname)
+
+  // Step 1: perceive current screen — we should be on a form's field list
+  let { screenshot, pageState } = await captureAndPerceive(tabId)
+
+  // Step 2: find and click "add field" to open the field creation UI
+  if (!pageState.screen.includes('field')) {
+    const decision = await decideAction(
+      screenshot,
+      pageState,
+      'Find and click the button or link that adds a new field to the current form',
+    )
+    if (decision.confidence >= 0.6) {
+      await sendInteract(tabId, {
+        kind: 'click',
+        targetLabel: decision.targetLabel,
+        targetRole: decision.targetRole,
+        fallbackPosition: decision.fallbackPosition,
+      })
+      await wait(1200)
+      ;({ screenshot, pageState } = await captureAndPerceive(tabId))
+    }
+  }
+
+  // Step 3: find and click the type picker if it isn't already open
+  if (!pageState.screen.includes('type')) {
+    const decision = await decideAction(
+      screenshot,
+      pageState,
+      'Find and click the field type selector, type picker, or element type dropdown',
+    )
+    if (decision.confidence >= 0.6) {
+      await sendInteract(tabId, {
+        kind: 'click',
+        targetLabel: decision.targetLabel,
+        targetRole: decision.targetRole,
+        fallbackPosition: decision.fallbackPosition,
+      })
+      await wait(1200)
+      ;({ screenshot, pageState } = await captureAndPerceive(tabId))
+    }
+  }
+
+  // Step 4: discover vocabulary from the current screenshot (type picker visible)
+  const a11yTree = pageState.controls
+  const entries = await discoverVocabulary(screenshot, a11yTree)
+  console.log('[worker] Vocabulary: discovered', entries.length, 'entries')
+
+  const { map, escalations, missing } = buildVocabularyResult(entries, screenshot)
+
+  if (missing.length > 0) {
+    console.warn('[worker] Vocabulary: no mapping found for canonical types:', missing.join(', '))
+  }
+
+  // Cache for future runs on this platform
+  await cacheVocabulary(hostname, map)
+
+  return { map, escalations }
 }
 
 // ── Message routing ────────────────────────────────────────────────────────────
@@ -98,17 +190,22 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
       }
 
       initGemini(apiKey)
+      const tab = await chrome.tabs.get(message.tabId)
+      const hostname = tab.url ? new URL(tab.url).hostname : 'unknown'
+
       const runState = createRunState(ir)
       runState.targetTabId = message.tabId
+      runState.targetHostname = hostname
       await setState(runState)
 
+      const cycleCount = runState.plan.filter((s) => s.status === 'escalated').length
       console.log(
         `[worker] Plan compiled: ${runState.plan.length} steps for "${ir.study.title}"`,
-        runState.plan.filter((s) => s.status === 'escalated').length,
-        'cycle-detected escalations'
+        cycleCount > 0 ? `(${cycleCount} cycle escalations)` : ''
       )
 
       // TODO: kick off execution loop (Phase 5)
+      // Vocabulary discovery will be triggered in the execution loop before the first field step.
       return null
     }
 

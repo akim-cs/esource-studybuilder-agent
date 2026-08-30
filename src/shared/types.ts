@@ -138,6 +138,7 @@ export interface RunState {
   plan: BuildStep[];
   currentStepIndex: number;
   targetTabId?: number;
+  targetHostname?: string;
   vocabularyMap?: VocabularyMap;
   escalationQueue: EscalationItem[];
   traceLog: TraceEntry[];

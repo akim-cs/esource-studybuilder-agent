@@ -139,6 +139,23 @@ Run **once per platform** (cached by `window.location.hostname`):
 
 **Why it generalizes:** Gemini reasons semantically. "Check List" → `multi_select`, "Tick Box" → `checkbox`. The model is never shown both at training time — it infers from meaning.
 
+### Concept breakdown
+
+The input JSON uses 13 standard type names (`integer`, `single_select`, `checkbox`, etc.). Every eSource platform uses its own names for the same things — "Whole Number," "Coded Pick List," "Tick Box." Before creating any fields, the agent needs a lookup table: *on this platform, what do I actually click to get a field of type `integer`?* That table is the **vocabulary map**.
+
+**How it's built:** The agent navigates to the type picker (the dropdown where a human would choose a field type), screenshots it, and sends it to Gemini. Gemini reads every option and reasons about what each one means — not by matching strings, but by understanding semantics. It also returns a confidence score per mapping. Anything below 80% is flagged for human review before a single field is touched.
+
+**Caching:** Once built, the map is saved to `chrome.storage.local` keyed by the platform's hostname. Re-running the extension on the same platform skips discovery entirely.
+
+| Piece | What it does |
+|---|---|
+| `loadCachedVocabulary` | Check if we've already mapped this platform's types before |
+| `cacheVocabulary` | Save the lookup table so the next run skips discovery |
+| `buildVocabularyResult` | Convert Gemini's answers into the map; flag anything under 80% confident |
+| `applyVocabOverride` | Apply a human's correction to a mapping |
+| `runVocabularyDiscovery` | Full sequence: navigate → screenshot type picker → ask Gemini → build map → cache → return escalations |
+| `sendInteract` | Tell the content script to click something (also reused by Phase 5) |
+
 ---
 
 ## Action Executor
