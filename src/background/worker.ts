@@ -3,6 +3,8 @@
 // calls Gemini for all LLM decisions, and writes state back to chrome.storage.local.
 
 import type { ExtMessage, RunState } from '../shared/types'
+import { validateIR, createRunState, IRValidationError } from '../shared/planner'
+import { initGemini } from '../shared/gemini'
 
 // ── Storage helpers ────────────────────────────────────────────────────────────
 
@@ -22,6 +24,11 @@ function broadcastState(runState: RunState): void {
   })
 }
 
+async function getApiKey(): Promise<string | null> {
+  const { geminiApiKey } = await chrome.storage.local.get('geminiApiKey')
+  return geminiApiKey ?? null
+}
+
 // ── Message routing ────────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message: ExtMessage, _sender, sendResponse) => {
@@ -34,30 +41,93 @@ chrome.runtime.onMessage.addListener((message: ExtMessage, _sender, sendResponse
 
 async function handleMessage(message: ExtMessage): Promise<unknown> {
   switch (message.type) {
-    case 'START_RUN':
-      // TODO: validate IR, compile build plan, start execution loop
-      console.log('[worker] START_RUN received', message.studyIR.study.title)
-      return null
+    case 'START_RUN': {
+      const apiKey = await getApiKey()
+      if (!apiKey) {
+        const errState: RunState = {
+          status: 'error',
+          plan: [],
+          currentStepIndex: 0,
+          escalationQueue: [],
+          traceLog: [],
+          errorMessage: 'Gemini API key not set. Open extension options to configure it.',
+        }
+        await setState(errState)
+        return null
+      }
 
-    case 'PAUSE_RUN':
-      // TODO: set state.status = 'paused'
-      console.log('[worker] PAUSE_RUN received')
-      return null
+      let ir
+      try {
+        ir = validateIR(message.studyIR)
+      } catch (err) {
+        const errState: RunState = {
+          status: 'error',
+          plan: [],
+          currentStepIndex: 0,
+          escalationQueue: [],
+          traceLog: [],
+          errorMessage: err instanceof IRValidationError
+            ? err.message
+            : `IR parse error: ${String(err)}`,
+        }
+        await setState(errState)
+        return null
+      }
 
-    case 'RESUME_RUN':
-      // TODO: resume execution from current step
-      console.log('[worker] RESUME_RUN received')
-      return null
+      initGemini(apiKey)
+      const runState = createRunState(ir)
+      await setState(runState)
 
-    case 'ABORT_RUN':
-      // TODO: clear run state
-      console.log('[worker] ABORT_RUN received')
-      return null
+      console.log(
+        `[worker] Plan compiled: ${runState.plan.length} steps for "${ir.study.title}"`,
+        runState.plan.filter((s) => s.status === 'escalated').length,
+        'cycle-detected escalations'
+      )
 
-    case 'RESOLVE_ESCALATION':
-      // TODO: apply resolution, resume
-      console.log('[worker] RESOLVE_ESCALATION received', message.escalationId)
+      // TODO: kick off execution loop (Phase 5)
       return null
+    }
+
+    case 'PAUSE_RUN': {
+      const state = await getState()
+      if (state && state.status === 'running') {
+        await setState({ ...state, status: 'paused' })
+      }
+      return null
+    }
+
+    case 'RESUME_RUN': {
+      const state = await getState()
+      if (state && state.status === 'paused') {
+        await setState({ ...state, status: 'running' })
+        // TODO: resume execution loop (Phase 5)
+      }
+      return null
+    }
+
+    case 'ABORT_RUN': {
+      const blank: RunState = {
+        status: 'idle',
+        plan: [],
+        currentStepIndex: 0,
+        escalationQueue: [],
+        traceLog: [],
+      }
+      await setState(blank)
+      return null
+    }
+
+    case 'RESOLVE_ESCALATION': {
+      const state = await getState()
+      if (!state) return null
+      const item = state.escalationQueue.find((e) => e.id === message.escalationId)
+      if (item) {
+        item.resolution = message.resolution
+        await setState({ ...state })
+      }
+      // TODO: check if this unblocks the run (Phase 6)
+      return null
+    }
 
     default:
       return null
