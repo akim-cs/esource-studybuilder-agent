@@ -160,21 +160,28 @@ The input JSON uses 13 standard type names (`integer`, `single_select`, `checkbo
 
 ## Action Executor
 
-Per-step loop:
-```
-perceive() → Gemini decides action → interact() → wait for DOM → perceive() → verify
-```
+The agent's hands. For every step: **perceive → Gemini picks control → interact → verify**. Repeats up to 2× on failure before escalating to the human.
 
-### Critical ordering for `addField`
-1. **Set type first** — changing type later silently discards range/options on many platforms
-2. Set label + required flag
-3. **Save and confirm** — re-perceive; if screen unchanged after 2 retries → escalate
-4. Add options (enter code + label for each; verify both present after entry)
-5. Add range (min / max / units)
-6. Add skip logic last (dependent field must already exist)
+### `addField` sub-step order (strict — order matters)
+1. **Type first** — platforms silently wipe range/options if type changes after they're set
+2. Label → required flag → **save + verify**
+3. Options (code AND label per entry)
+4. Range (min / max / units)
+5. Skip logic last — target field must already exist in the form
 
-### Save confirmation
-After clicking the apparent save control, re-perceive. A successful save typically changes the nav state (e.g., returns to a list, shows a success indicator). If state is unchanged → retry. After 2 failures → escalate.
+### Key behaviours
+- **Save confirmation:** after every save, re-perceive and ask Gemini "did this work?" — never assume a click succeeded
+- **Checkpointing:** `chrome.storage.local` is written after every step so the run survives Chrome killing the service worker (~5 min MV3 limit)
+- **Idempotency:** before creating anything, check the a11y tree for the label — skip if already present
+
+| Function | What it does |
+|---|---|
+| `createVisit` | Find add-visit → fill name → save → verify |
+| `createForm` | Navigate to visit → add form → fill name + repeating flag → save → verify |
+| `addField` | 7 ordered sub-steps as above; escalates on any unconfirmed save |
+| `saveAndVerify` | Click save → re-perceive → Gemini checks result → retry once → escalate |
+| `existsOnScreen` | A11y tree label check before creating — prevents duplicates |
+| `runLoop` | Walks BuildStep[], triggers vocab discovery before first field, checkpoints every step |
 
 ---
 
