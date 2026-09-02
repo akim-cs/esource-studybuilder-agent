@@ -1,4 +1,4 @@
-// Gemini 2.0 Flash API wrapper — all LLM calls go through here.
+// Gemini 3.6 Flash API wrapper — all LLM calls go through here.
 // Uses @google/genai v1.x (createPartFromBase64 / createPartFromText helpers).
 
 import { GoogleGenAI, createPartFromBase64, createPartFromText } from '@google/genai'

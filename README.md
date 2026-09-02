@@ -1,6 +1,6 @@
 # eSource StudyBuilder Agent
 
-A Chrome extension that autonomously builds clinical trial study structures in eSource web platforms from a JSON specification file. Driven by Gemini 2.5 Flash (vision + reasoning) — no hardcoded UI selectors.
+A Chrome extension that autonomously builds clinical trial study structures in eSource web platforms from a JSON specification file. Driven by Gemini 3.6 Flash (vision + reasoning) — no hardcoded UI selectors.
 
 ## Setup
 

@@ -105,6 +105,19 @@ function findElement(targetLabel: string, targetRole: string): HTMLElement | nul
   return null
 }
 
+// Assign .value through the prototype setter: framework-controlled inputs
+// (React, Angular) track their own value state and ignore direct assignment,
+// which would silently discard typed text on the next re-render.
+function setNativeValue(el: HTMLElement, value: string): void {
+  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+  const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
+  if (descriptor?.set) {
+    descriptor.set.call(el, value)
+  } else {
+    ;(el as HTMLInputElement).value = value
+  }
+}
+
 async function performInteraction(action: InteractAction): Promise<{ success: boolean; error?: string }> {
   const el = findElement(action.targetLabel, action.targetRole)
 
@@ -128,14 +141,14 @@ async function performInteraction(action: InteractAction): Promise<{ success: bo
         break
       case 'type':
         el.focus()
-        ;(el as HTMLInputElement).value = ''
-        ;(el as HTMLInputElement).value = action.value ?? ''
+        setNativeValue(el, '')
+        setNativeValue(el, action.value ?? '')
         el.dispatchEvent(new Event('input', { bubbles: true }))
         el.dispatchEvent(new Event('change', { bubbles: true }))
         break
       case 'clear':
         el.focus()
-        ;(el as HTMLInputElement).value = ''
+        setNativeValue(el, '')
         el.dispatchEvent(new Event('input', { bubbles: true }))
         break
       case 'select':

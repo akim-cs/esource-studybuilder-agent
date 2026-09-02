@@ -10,6 +10,13 @@ import { discoverVocabulary, decideAction, validateApiKey } from '../shared/gemi
 import { captureAndPerceive, sendInteract, wait } from './helpers'
 import { executeStep } from './executor'
 
+// ── Run-control flags ──────────────────────────────────────────────────────────
+// chrome.storage.get returns clones, so PAUSE_RUN/ABORT_RUN can never mutate the
+// RunState object an in-flight runLoop is holding. These module-level flags live
+// in the same service-worker context, so runLoop sees them on the next step.
+
+const runControl = { pauseRequested: false, abortRequested: false }
+
 // ── Storage ────────────────────────────────────────────────────────────────────
 
 async function getState(): Promise<RunState | null> {
@@ -80,6 +87,15 @@ async function runLoop(state: RunState): Promise<void> {
   if (!tabId || !hostname) return
 
   while (state.currentStepIndex < state.plan.length && state.status === 'running') {
+    // Honour pause/abort between steps, before any checkpoint write can
+    // overwrite the status the message handlers put in storage.
+    if (runControl.abortRequested) return
+    if (runControl.pauseRequested) {
+      state.status = 'paused'
+      await setState(state)
+      return
+    }
+
     const step = state.plan[state.currentStepIndex]
 
     // For escalated cycle steps (from planner topo-sort), surface a card if one isn't queued yet
@@ -181,6 +197,8 @@ async function runLoop(state: RunState): Promise<void> {
       })
     }
 
+    if (runControl.abortRequested) return  // don't checkpoint over the aborted (idle) state
+
     state.currentStepIndex++
     await setState(state)   // checkpoint — survives SW restart
 
@@ -241,6 +259,8 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
       const runState = createRunState(ir)
       runState.targetTabId = message.tabId
       runState.targetHostname = hostname
+      runControl.pauseRequested = false
+      runControl.abortRequested = false
       await setState(runState)
 
       console.log(`[worker] Plan: ${runState.plan.length} steps for "${ir.study.title}"`)
@@ -249,12 +269,14 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
     }
 
     case 'PAUSE_RUN': {
+      runControl.pauseRequested = true
       const state = await getState()
       if (state?.status === 'running') await setState({ ...state, status: 'paused' })
       return null
     }
 
     case 'RESUME_RUN': {
+      runControl.pauseRequested = false
       const state = await getState()
       if (state?.status === 'paused') {
         state.status = 'running'
@@ -265,6 +287,7 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
     }
 
     case 'ABORT_RUN': {
+      runControl.abortRequested = true
       await setState({ status: 'idle', plan: [], currentStepIndex: 0, escalationQueue: [], traceLog: [] })
       return null
     }
@@ -286,6 +309,7 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
         // If all pending escalations resolved, resume
         const allResolved = state.escalationQueue.every((e) => !!e.resolution)
         if (allResolved && state.status === 'paused') {
+          runControl.pauseRequested = false
           state.status = 'running'
           await setState(state)
           runLoop(state).catch(console.error)
@@ -301,6 +325,7 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
       if (!state) return null
       const stepIdx = state.plan.findIndex((s) => s.stepId === message.stepId)
       if (stepIdx === -1) return null
+      runControl.pauseRequested = false
       state.plan[stepIdx].status = 'pending'
       state.currentStepIndex = stepIdx
       state.status = 'running'
