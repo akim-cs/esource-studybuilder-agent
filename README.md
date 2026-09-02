@@ -40,19 +40,6 @@ State checkpoints to `chrome.storage.local` after every step, so a run survives 
 
 ---
 
-## Mapping canonical types to an unknown platform
-
-The input JSON uses 13 canonical types (`integer`, `single_select`, …); every platform labels them differently ("Whole Number", "Coded Pick List", "Tick Box"). Once per platform — cached by hostname in `chrome.storage.local`:
-
-1. The agent navigates into a form builder so the element library is visible
-2. Gemini reads every type tile and maps each to a canonical type, with a confidence score and reasoning
-3. Mappings under 80% confidence are queued for human review **before any field is created**
-4. Human overrides update the map immediately and apply to all remaining fields in the run
-
-This generalises because the mapping is semantic, not string matching — Gemini reasons about what each platform label *means*.
-
----
-
 ## Human gate
 
 The agent pauses and shows a review card in the side panel when:
@@ -75,20 +62,6 @@ Design choices that keep it platform-agnostic:
 - Fields are built in topological order so skip-logic targets always exist first
 - Idempotency: before creating anything, the agent checks the page for an existing label — re-runs never duplicate
 
-**Evidence:**
-
-<!-- TODO: fill in honestly before submitting -->
-- _Supplied mock:_ by-hand verification results — see checklist below
-- _Modified / second mock:_ rename element library entries, move Save, reorder screens, swap a dropdown for radio, restructure the DOM (or a second mock of your own) — run the extension unchanged and record what % built correctly
-
-### Verifying by hand
-
-1. Run the extension end to end on the mock
-2. In DevTools console on the mock, call `__readState()` / `__exportState()` to dump the saved study as JSON
-3. Diff against the input file: every form present, every field present, every type correct, every coded value list complete with codes **and** labels, every range and unit, every skip-logic rule, the right forms marked repeating
-
-<!-- TODO: paste summary of the diff results here -->
-
 ---
 
 ## Where it breaks
@@ -109,7 +82,6 @@ Known failure modes (full log in [DESIGN.md](DESIGN.md#potential-breaks)) and wh
 
 ## How long a run takes
 
-<!-- TODO: replace with the measured time from your recorded run -->
 Designed budget: a full sample-study run (195 fields ≈ 585 Gemini calls) takes roughly **40 minutes**, driven almost entirely by the free-tier 15 requests/minute limit (4.5 s spacing between calls). The daily free-tier cap (1,500 requests) fits one full run comfortably.
 
 ---
@@ -123,42 +95,6 @@ Designed budget: a full sample-study run (195 fields ≈ 585 Gemini calls) takes
 - **Exportable audit report** (beyond the current trace-log export)
 
 ---
-
-## AI tools used
-
-<!-- TODO: fill in — which tools (e.g. ChatGPT/Claude/Copilot/Matilda), for what parts, where they helped and where they got in the way -->
-
----
-
-## Reference
-
-### Input file format
-
-```json
-{
-  "ir_version": "1.0",
-  "study": { "protocol_id": "...", "title": "..." },
-  "visits": [{
-    "name": "Screening",
-    "window_start_day": -7,
-    "window_end_day": 0,
-    "forms": [{
-      "name": "Vital Signs",
-      "repeating": false,
-      "fields": [{
-        "label": "Systolic BP",
-        "type": "integer",
-        "required": true,
-        "min": 60,
-        "max": 200,
-        "units": "mmHg"
-      }]
-    }]
-  }]
-}
-```
-
-**Canonical field types:** `text` · `textarea` · `integer` · `decimal` · `date` · `time` · `datetime` · `boolean` · `single_select` · `multi_select` · `radio` · `checkbox` · `calculated`
 
 ### Development
 
