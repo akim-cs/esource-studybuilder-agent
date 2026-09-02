@@ -45,23 +45,17 @@ async function runVocabularyDiscovery(
 
   let { screenshot, pageState } = await captureAndPerceive(tabId)
 
-  // Navigate to add-field UI if not already there
-  if (!pageState.screen.includes('field')) {
-    const d = await decideAction(screenshot, pageState, 'Click the button or link to add a new field to the current form')
-    if (d.confidence >= 0.6) {
+  // Navigate into any form builder so the element library panel is visible.
+  // The library panel (with all type tiles) is the platform's type vocabulary on screen.
+  for (let attempt = 0; attempt < 3 && !pageState.screen.toLowerCase().includes('builder'); attempt++) {
+    const d = await decideAction(screenshot, pageState,
+      'Navigate into any form builder — click an Edit button on a source document, or enter the form designer, so the element library panel becomes visible')
+    if (d.confidence >= 0.5) {
       await sendInteract(tabId, { kind: 'click', targetLabel: d.targetLabel, targetRole: d.targetRole, fallbackPosition: d.fallbackPosition })
       await wait(1200)
       ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    }
-  }
-
-  // Open the type picker if not already visible
-  if (!pageState.screen.includes('type')) {
-    const d = await decideAction(screenshot, pageState, 'Find and click the field type selector, type picker, or element type dropdown')
-    if (d.confidence >= 0.6) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: d.targetLabel, targetRole: d.targetRole, fallbackPosition: d.fallbackPosition })
-      await wait(1200)
-      ;({ screenshot, pageState } = await captureAndPerceive(tabId))
+    } else {
+      break
     }
   }
 

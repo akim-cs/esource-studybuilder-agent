@@ -6,18 +6,41 @@ import type { ExtMessage, PageState, UIControl, InteractAction } from '../shared
 
 // ── Perception ─────────────────────────────────────────────────────────────────
 
+function resolveLabel(el: HTMLElement): string {
+  // aria-label takes priority
+  const ariaLabel = el.getAttribute('aria-label')
+  if (ariaLabel) return ariaLabel.trim()
+
+  // aria-labelledby
+  const labelledBy = el.getAttribute('aria-labelledby')
+  if (labelledBy) {
+    const text = document.getElementById(labelledBy)?.textContent?.trim()
+    if (text) return text
+  }
+
+  // <label for="id"> association — this is the standard HTML pattern used by most form builders
+  if (el.id) {
+    const associated = document.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(el.id)}"]`)
+    if (associated) {
+      const text = associated.textContent?.trim()
+      if (text) return text
+    }
+  }
+
+  // title attribute
+  const title = el.getAttribute('title')
+  if (title) return title
+
+  // textContent fallback (buttons, links)
+  return el.textContent?.trim().slice(0, 80) ?? ''
+}
+
 function buildA11yTree(): UIControl[] {
   const controls: UIControl[] = []
-  const interactiveTags = ['button', 'a', 'input', 'select', 'textarea', '[role]']
-  const nodes = document.querySelectorAll<HTMLElement>(interactiveTags.join(','))
+  const nodes = document.querySelectorAll<HTMLElement>('button, a, input, select, textarea, [role]')
 
   nodes.forEach((el) => {
-    const label =
-      el.getAttribute('aria-label') ||
-      el.getAttribute('aria-labelledby') && document.getElementById(el.getAttribute('aria-labelledby')!)?.textContent ||
-      el.getAttribute('title') ||
-      el.textContent?.trim().slice(0, 80) ||
-      ''
+    const label = resolveLabel(el)
     const role = el.getAttribute('role') || el.tagName.toLowerCase()
     const rect = el.getBoundingClientRect()
 
@@ -52,25 +75,33 @@ function findElement(targetLabel: string, targetRole: string): HTMLElement | nul
   const normalizedLabel = targetLabel.trim().toLowerCase()
   const normalizedRole = targetRole.trim().toLowerCase()
 
-  const candidates = document.querySelectorAll<HTMLElement>(
-    'button, a, input, select, textarea, [role]'
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLElement>('button, a, input, select, textarea, [role]')
   )
 
-  for (const el of candidates) {
-    const role = (el.getAttribute('role') || el.tagName.toLowerCase()).toLowerCase()
-    if (normalizedRole !== 'any' && !role.includes(normalizedRole)) continue
-
-    const label = (
-      el.getAttribute('aria-label') ||
-      el.getAttribute('title') ||
-      el.textContent?.trim() ||
-      ''
-    ).toLowerCase()
-
-    if (label.includes(normalizedLabel) || normalizedLabel.includes(label)) {
-      return el
-    }
+  function getLabel(el: HTMLElement): string {
+    return resolveLabel(el).toLowerCase()
   }
+
+  function roleMatches(el: HTMLElement): boolean {
+    if (normalizedRole === 'any') return true
+    const role = (el.getAttribute('role') || el.tagName.toLowerCase()).toLowerCase()
+    return role.includes(normalizedRole)
+  }
+
+  // First pass: exact label match — avoids picking "Save As Template" when looking for "Save"
+  for (const el of candidates) {
+    if (!roleMatches(el)) continue
+    if (getLabel(el) === normalizedLabel) return el
+  }
+
+  // Second pass: substring match
+  for (const el of candidates) {
+    if (!roleMatches(el)) continue
+    const label = getLabel(el)
+    if (label.includes(normalizedLabel) || normalizedLabel.includes(label)) return el
+  }
+
   return null
 }
 
@@ -109,8 +140,9 @@ async function performInteraction(action: InteractAction): Promise<{ success: bo
         break
       case 'select':
         if (el instanceof HTMLSelectElement) {
+          const needle = (action.value ?? '').toLowerCase()
           const option = Array.from(el.options).find(
-            (o) => o.text.toLowerCase().includes((action.value ?? '').toLowerCase())
+            (o) => o.text.toLowerCase() === needle || o.text.toLowerCase().includes(needle) || o.value.toLowerCase() === needle
           )
           if (option) el.value = option.value
           el.dispatchEvent(new Event('change', { bubbles: true }))
