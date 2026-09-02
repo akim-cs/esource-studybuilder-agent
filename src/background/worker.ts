@@ -88,7 +88,24 @@ async function runLoop(state: RunState): Promise<void> {
   while (state.currentStepIndex < state.plan.length && state.status === 'running') {
     const step = state.plan[state.currentStepIndex]
 
-    // Skip steps that were already resolved (e.g. cycle escalations from planner)
+    // For escalated cycle steps (from planner topo-sort), surface a card if one isn't queued yet
+    if (step.status === 'escalated' && !state.escalationQueue.some((e) => e.stepId === step.stepId)) {
+      const fieldLabel = (step.payload as { label?: string }).label ?? step.inputRef
+      state.escalationQueue.push({
+        id: `cycle_${step.stepId}`,
+        stepId: step.stepId,
+        inputRef: step.inputRef,
+        issue: `Skip-logic cycle detected for field "${fieldLabel}" — its dependencies form a cycle and cannot be automatically ordered. Skip this field or resolve the cycle in the input JSON.`,
+        screenshot: '',
+        bestGuess: 'Skip this field and set its skip logic manually after the run completes',
+        confidence: 1.0,
+      })
+      state.status = 'paused'
+      await setState(state)
+      return
+    }
+
+    // Skip steps already resolved (done, skipped, or previously handled escalations)
     if (step.status !== 'pending') {
       state.currentStepIndex++
       continue
@@ -96,11 +113,36 @@ async function runLoop(state: RunState): Promise<void> {
 
     // Vocabulary discovery — triggered once before the first field step
     if (step.type === 'field' && !state.vocabularyMap) {
-      const { map, escalations } = await runVocabularyDiscovery(tabId, hostname)
-      state.vocabularyMap = map
-      state.escalationQueue.push(...escalations)
+      let vocabResult: { map: VocabularyMap; escalations: EscalationItem[] } | null = null
+      for (let attempt = 0; attempt < 2 && !vocabResult; attempt++) {
+        try {
+          if (attempt > 0) await wait(1500)
+          vocabResult = await runVocabularyDiscovery(tabId, hostname)
+        } catch (err) {
+          console.error('[worker] Vocab discovery attempt', attempt + 1, 'failed:', err)
+        }
+      }
 
-      if (escalations.length > 0) {
+      if (!vocabResult) {
+        state.vocabularyMap = {} as VocabularyMap  // prevent re-entry on next resume
+        state.escalationQueue.push({
+          id: 'vocab_discovery_failed',
+          stepId: step.stepId,
+          inputRef: step.inputRef,
+          issue: 'Vocabulary discovery failed after 2 attempts — the agent cannot map field types for this platform. Check that the eSource tab is open and the extension has access to it.',
+          screenshot: '',
+          bestGuess: 'Ensure the eSource tab is accessible, then retry the run',
+          confidence: 1.0,
+        })
+        state.status = 'paused'
+        await setState(state)
+        return
+      }
+
+      state.vocabularyMap = vocabResult.map
+      state.escalationQueue.push(...vocabResult.escalations)
+
+      if (vocabResult.escalations.length > 0) {
         // Pause for human to review low-confidence type mappings before touching any field
         state.status = 'paused'
         await setState(state)
@@ -244,6 +286,19 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
           await setState(state)
         }
       }
+      return null
+    }
+
+    case 'RETRY_STEP': {
+      const state = await getState()
+      if (!state) return null
+      const stepIdx = state.plan.findIndex((s) => s.stepId === message.stepId)
+      if (stepIdx === -1) return null
+      state.plan[stepIdx].status = 'pending'
+      state.currentStepIndex = stepIdx
+      state.status = 'running'
+      await setState(state)
+      runLoop(state).catch(console.error)
       return null
     }
 

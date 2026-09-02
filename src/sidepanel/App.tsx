@@ -146,6 +146,11 @@ function EscalationCard({ item, onResolve }: { item: EscalationItem; onResolve: 
 
 function StepList({ plan, currentIndex }: { plan: RunState['plan']; currentIndex: number }) {
   const visible = plan.slice(Math.max(0, currentIndex - 3), currentIndex + 8)
+
+  function retryStep(stepId: string) {
+    chrome.runtime.sendMessage({ type: 'RETRY_STEP', stepId } satisfies ExtMessage)
+  }
+
   return (
     <div style={{ marginTop: 10, fontSize: 11, color: '#444' }}>
       {visible.map((step, i) => {
@@ -154,10 +159,18 @@ function StepList({ plan, currentIndex }: { plan: RunState['plan']; currentIndex
         const payload = step.payload as { name?: string; label?: string }
         const name = payload.label ?? payload.name ?? step.type
         return (
-          <div key={step.stepId + i} style={{ display: 'flex', gap: 5, padding: '1px 0' }}>
+          <div key={step.stepId + i} style={{ display: 'flex', gap: 5, padding: '1px 0', alignItems: 'center' }}>
             <span style={{ color, width: 12, flexShrink: 0 }}>{icon}</span>
             <span style={{ color: '#888', width: 36, flexShrink: 0 }}>{step.type}</span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{name}</span>
+            {step.status === 'failed' && (
+              <button
+                onClick={() => retryStep(step.stepId)}
+                style={{ fontSize: 10, padding: '0 4px', cursor: 'pointer', flexShrink: 0 }}
+              >
+                Retry
+              </button>
+            )}
           </div>
         )
       })}

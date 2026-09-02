@@ -307,7 +307,7 @@ async function addField(tabId: number, step: BuildStep, vocabMap: VocabularyMap)
     finalShot,
     `The field list shows a field labeled exactly "${field.label}" with type "${platformType}"`,
   )
-  if (!readBack.success && readBack.confidence >= 0.7) {
+  if (!readBack.success || readBack.confidence < 0.7) {
     return {
       outcome: 'escalated', action: 'addField:readBack', reasoning: readBack.reason,
       escalation: {

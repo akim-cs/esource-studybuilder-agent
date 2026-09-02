@@ -154,6 +154,7 @@ export type ExtMessage =
   | { type: 'ABORT_RUN' }
   | { type: 'STATE_UPDATE'; runState: RunState }
   | { type: 'RESOLVE_ESCALATION'; escalationId: string; resolution: EscalationResolution }
+  | { type: 'RETRY_STEP'; stepId: string }
   | { type: 'GET_PAGE_STATE' }
   | { type: 'PAGE_STATE_RESULT'; state: PageState; screenshotDataUrl: string }
   | { type: 'INTERACT'; action: InteractAction }
