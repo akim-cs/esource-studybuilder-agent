@@ -1,10 +1,10 @@
-// Action executor — the perceive → decide → interact → verify loop.
-// Creates visits, forms, and fields by driving the UI through Gemini decisions.
-// Never uses hardcoded selectors — every target is identified by Gemini from a live screenshot.
+// Action executor — snapshot once → plan all actions → execute → verify.
+// One Gemini call plans the complete action sequence for each step;
+// a second call verifies the outcome. Navigation uses the same pattern.
 
 import type { BuildStep, Visit, Form, Field, VocabularyMap, EscalationItem, CanonicalType } from '../shared/types'
-import { decideAction, verifyOutcome } from '../shared/gemini'
-import { captureAndPerceive, sendInteract, wait } from './helpers'
+import { verifyOutcome, planActions } from '../shared/gemini'
+import { captureAndPerceive, getPageSnapshot, sendInteract, wait } from './helpers'
 
 // ── Step result ────────────────────────────────────────────────────────────────
 
@@ -17,135 +17,76 @@ export interface StepResult {
 
 // ── Shared utilities ───────────────────────────────────────────────────────────
 
+// No Gemini — just checks the raw a11y tree for a label substring.
 async function existsOnScreen(tabId: number, label: string): Promise<boolean> {
-  const { pageState } = await captureAndPerceive(tabId)
-  const target = label.toLowerCase()
-  return pageState.controls.some((c) => c.label.toLowerCase().includes(target))
+  const { rawState } = await getPageSnapshot(tabId)
+  return rawState.controls.some((c) => c.label.toLowerCase().includes(label.toLowerCase()))
 }
 
-// saveAndVerify: click save then confirm the expected state appeared.
-// Uses a specific save goal to avoid adjacent decoy buttons (e.g. "Save As Template").
-async function saveAndVerify(
-  tabId: number,
-  stepId: string,
-  inputRef: string,
-  expectation: string,
-): Promise<{ success: boolean; escalation?: EscalationItem }> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const { screenshot, pageState } = await captureAndPerceive(tabId)
-    const saveDecision = await decideAction(
-      screenshot, pageState,
-      'Click the primary Save button to commit changes — NOT "Save As Template", NOT "Activate", NOT "Preview"',
-    )
-
-    if (saveDecision.confidence >= 0.5) {
-      await sendInteract(tabId, {
-        kind: 'click',
-        targetLabel: saveDecision.targetLabel,
-        targetRole: saveDecision.targetRole,
-        fallbackPosition: saveDecision.fallbackPosition,
-      })
-      await wait(1200)
-
-      const { screenshot: after } = await captureAndPerceive(tabId)
-      const check = await verifyOutcome(after, expectation)
-      if (check.success && check.confidence >= 0.7) return { success: true }
-    }
-  }
-
-  const { screenshot: failShot } = await captureAndPerceive(tabId)
-  return {
-    success: false,
-    escalation: {
-      id: `save_${stepId}`,
-      stepId,
-      inputRef,
-      issue: `Save could not be confirmed after 2 attempts. Expected: "${expectation}"`,
-      screenshot: failShot,
-      bestGuess: 'Save may have succeeded but state change was not detected',
-      confidence: 0.3,
-    },
+// Execute a planned action sequence with a short pause between each action.
+async function runPlan(tabId: number, actions: { kind: string; targetLabel: string; targetRole: string; value?: string; fallbackPosition?: { x: number; y: number } }[]): Promise<void> {
+  for (const action of actions) {
+    await sendInteract(tabId, {
+      kind: action.kind as 'click' | 'type' | 'select' | 'clear',
+      targetLabel: action.targetLabel,
+      targetRole: action.targetRole,
+      value: action.value,
+      fallbackPosition: action.fallbackPosition,
+    })
+    await wait(350)
   }
 }
 
 // ── Navigation helpers ─────────────────────────────────────────────────────────
+// captureAndPerceive (Gemini) for screen detection; planActions (Gemini) for action planning.
+// Together: 2 calls per iteration — same count as before, but planActions can encode
+// multi-click sequences so we need fewer iterations overall.
 
-// Navigate to the study plan page from any screen. Used before cross-visit navigation.
 async function navigateToPlan(tabId: number): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const { screenshot, pageState } = await captureAndPerceive(tabId)
     const screen = pageState.screen.toLowerCase()
     const nav = pageState.nav_state.toLowerCase()
-    // Already at the plan (visit schedule) level if we see a "visit schedule" or "study plan" heading
-    // and are NOT inside a builder or visit detail
     if ((nav.includes('plan') || screen.includes('visit schedule') || screen.includes('study plan'))
-        && !screen.includes('builder')) {
-      return
-    }
-    const d = await decideAction(screenshot, pageState,
-      'Navigate back to the Study Plan / Visit Schedule — click the back button, breadcrumb, or "Study Plan" tab')
-    if (d.confidence >= 0.5) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: d.targetLabel, targetRole: d.targetRole, fallbackPosition: d.fallbackPosition })
-      await wait(1000)
-    }
+        && !screen.includes('builder')) return
+
+    const actions = await planActions(screenshot, pageState.controls,
+      'Navigate back to the Study Plan / Visit Schedule — click the back button, breadcrumb, or tab. Return ALL navigation clicks needed.')
+    await runPlan(tabId, actions)
+    await wait(900)
   }
 }
 
-// Navigate to a specific visit's source-documents page.
 async function navigateToVisitDetail(tabId: number, visitName: string): Promise<void> {
   for (let attempt = 0; attempt < 4; attempt++) {
     const { screenshot, pageState } = await captureAndPerceive(tabId)
     const nav = pageState.nav_state.toLowerCase()
     const screen = pageState.screen.toLowerCase()
-
-    // Success: on the right visit detail page (not in a builder)
     if (nav.includes(visitName.toLowerCase()) && !screen.includes('builder')) return
 
-    // If in a builder, go up one level first
-    if (screen.includes('builder')) {
-      const backD = await decideAction(screenshot, pageState,
-        `Click the back button to leave the form builder and return to the visit or study plan`)
-      if (backD.confidence >= 0.5) {
-        await sendInteract(tabId, { kind: 'click', targetLabel: backD.targetLabel, targetRole: backD.targetRole, fallbackPosition: backD.fallbackPosition })
-        await wait(1000)
-        continue
-      }
-    }
-
-    // Try to click the target visit
-    const visitD = await decideAction(screenshot, pageState,
-      `Click on the visit named "${visitName}" in the visit schedule table to open its source documents list`)
-    if (visitD.confidence >= 0.5) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: visitD.targetLabel, targetRole: visitD.targetRole, fallbackPosition: visitD.fallbackPosition })
-      await wait(1000)
-    } else {
-      // Try going to plan first so the visit list is visible
-      await navigateToPlan(tabId)
-    }
+    const goal = screen.includes('builder')
+      ? 'Click the back button to leave the form builder and return to the visit or study plan'
+      : `Click the visit named "${visitName}" to open its source documents list. If the visit list is not visible, first navigate to the Study Plan.`
+    const actions = await planActions(screenshot, pageState.controls, goal)
+    await runPlan(tabId, actions)
+    await wait(900)
   }
 }
 
-// Navigate into the form builder for a specific form within a visit.
 async function navigateToFormBuilder(tabId: number, visitName: string, formName: string): Promise<void> {
-  // First ensure we're on the right visit detail page
   await navigateToVisitDetail(tabId, visitName)
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const { screenshot, pageState } = await captureAndPerceive(tabId)
     const nav = pageState.nav_state.toLowerCase()
     const screen = pageState.screen.toLowerCase()
+    if (screen.includes('builder') && (nav.includes(formName.toLowerCase()) ||
+        pageState.controls.some((c) => c.label.toLowerCase().includes(formName.toLowerCase())))) return
 
-    // Success: in the builder for the right form
-    if (screen.includes('builder') && nav.includes(formName.toLowerCase())) return
-    // Also accept: in any builder and the form name is visible in nav
-    if (screen.includes('builder') && pageState.controls.some(c => c.label.toLowerCase().includes(formName.toLowerCase()))) return
-
-    const editD = await decideAction(screenshot, pageState,
-      `Open the form builder for the source document named "${formName}" — click its Edit button or row`)
-    if (editD.confidence >= 0.5) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: editD.targetLabel, targetRole: editD.targetRole, fallbackPosition: editD.fallbackPosition })
-      await wait(1200)
-    }
+    const actions = await planActions(screenshot, pageState.controls,
+      `Open the form builder for the source document named "${formName}" — click its Edit button or row.`)
+    await runPlan(tabId, actions)
+    await wait(1100)
   }
 }
 
@@ -153,39 +94,35 @@ async function navigateToFormBuilder(tabId: number, visitName: string, formName:
 
 async function createVisit(tabId: number, step: BuildStep): Promise<StepResult> {
   const visit = step.payload as Visit
-
-  // Navigate to plan page for visit creation
   await navigateToPlan(tabId)
 
   if (await existsOnScreen(tabId, visit.name)) {
     return { outcome: 'skipped', action: 'createVisit', reasoning: `Visit "${visit.name}" already exists` }
   }
 
-  let { screenshot, pageState } = await captureAndPerceive(tabId)
-  const addDecision = await decideAction(screenshot, pageState, 'Click the button or link to add or create a new visit')
+  const { screenshot, rawState } = await getPageSnapshot(tabId)
+  const goal = [
+    `1. Click the button or link to add / create a new visit`,
+    `2. Type "${visit.name}" into the visit name input field`,
+    `3. Click Save (or confirm) to create the visit`,
+  ].join('\n')
 
-  if (addDecision.confidence < 0.6) {
+  const actions = await planActions(screenshot, rawState.controls, goal)
+  await runPlan(tabId, actions)
+  await wait(800)
+
+  const { screenshot: finalShot } = await getPageSnapshot(tabId)
+  const verify = await verifyOutcome(finalShot, `Visit named "${visit.name}" appears in the visit schedule list`)
+  if (!verify.success || verify.confidence < 0.7) {
     return {
-      outcome: 'escalated', action: 'createVisit', reasoning: 'Add-visit control not found',
+      outcome: 'escalated', action: 'createVisit', reasoning: verify.reason,
       escalation: {
-        id: `visit_add_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
-        issue: `Could not locate the "add visit" button. Best guess: "${addDecision.targetLabel}" (${Math.round(addDecision.confidence * 100)}% confident).`,
-        screenshot, bestGuess: addDecision.targetLabel, confidence: addDecision.confidence,
+        id: `visit_verify_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
+        issue: `Visit "${visit.name}" could not be confirmed after creation: ${verify.reason}`,
+        screenshot: finalShot, bestGuess: 'Visit may have been created', confidence: verify.confidence,
       },
     }
   }
-
-  await sendInteract(tabId, { kind: 'click', targetLabel: addDecision.targetLabel, targetRole: addDecision.targetRole, fallbackPosition: addDecision.fallbackPosition })
-  await wait(800)
-
-  ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-  const nameDecision = await decideAction(screenshot, pageState, `Find the visit name input field and type "${visit.name}"`)
-  await sendInteract(tabId, { kind: 'type', targetLabel: nameDecision.targetLabel, targetRole: nameDecision.targetRole, fallbackPosition: nameDecision.fallbackPosition, value: visit.name })
-  await wait(300)
-
-  const { success, escalation } = await saveAndVerify(tabId, step.stepId, step.inputRef, `Visit named "${visit.name}" appears in the list`)
-  if (!success) return { outcome: 'escalated', action: 'createVisit', reasoning: 'Save unconfirmed', escalation }
-
   return { outcome: 'success', action: 'createVisit', reasoning: `Created visit "${visit.name}"` }
 }
 
@@ -194,52 +131,95 @@ async function createVisit(tabId: number, step: BuildStep): Promise<StepResult> 
 async function createForm(tabId: number, step: BuildStep): Promise<StepResult> {
   const form = step.payload as Form
   const visitName = step.context.visitName!
-
-  // Navigate to the visit detail page (handles being in a builder or wrong visit)
   await navigateToVisitDetail(tabId, visitName)
 
-  const { screenshot: checkShot, pageState: checkState } = await captureAndPerceive(tabId)
-  if (checkState.controls.some((c) => c.label.toLowerCase().includes(form.name.toLowerCase()))) {
+  if (await existsOnScreen(tabId, form.name)) {
     return { outcome: 'skipped', action: 'createForm', reasoning: `Form "${form.name}" already exists` }
   }
 
-  let { screenshot, pageState } = await captureAndPerceive(tabId)
-  const addDecision = await decideAction(screenshot, pageState, 'Click the button to add a new form, source document, or CRF to this visit')
-  if (addDecision.confidence < 0.6) {
+  const { screenshot, rawState } = await getPageSnapshot(tabId)
+  const repeatingNote = form.repeating ? '\n3. Enable the repeating/recurring form toggle or checkbox' : ''
+  const saveStep = form.repeating ? 4 : 3
+  const goal = [
+    `1. Click the button to add a new form, source document, or CRF to this visit`,
+    `2. Type "${form.name}" into the form / document name input`,
+    repeatingNote,
+    `${saveStep}. Click Save to create the form`,
+  ].filter(Boolean).join('\n')
+
+  const actions = await planActions(screenshot, rawState.controls, goal)
+  await runPlan(tabId, actions)
+  await wait(800)
+
+  const { screenshot: finalShot } = await getPageSnapshot(tabId)
+  const verify = await verifyOutcome(finalShot, `Form named "${form.name}" appears under visit "${visitName}"`)
+  if (!verify.success || verify.confidence < 0.7) {
     return {
-      outcome: 'escalated', action: 'createForm', reasoning: 'Add-form control not found',
+      outcome: 'escalated', action: 'createForm', reasoning: verify.reason,
       escalation: {
-        id: `form_add_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
-        issue: `Could not locate the "add form" button under visit "${visitName}".`,
-        screenshot, bestGuess: addDecision.targetLabel, confidence: addDecision.confidence,
+        id: `form_verify_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
+        issue: `Form "${form.name}" could not be confirmed after creation: ${verify.reason}`,
+        screenshot: finalShot, bestGuess: 'Form may have been created', confidence: verify.confidence,
       },
     }
   }
-
-  await sendInteract(tabId, { kind: 'click', targetLabel: addDecision.targetLabel, targetRole: addDecision.targetRole, fallbackPosition: addDecision.fallbackPosition })
-  await wait(800)
-
-  ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-  const nameDecision = await decideAction(screenshot, pageState, `Find the form or document name input and type "${form.name}"`)
-  await sendInteract(tabId, { kind: 'type', targetLabel: nameDecision.targetLabel, targetRole: nameDecision.targetRole, fallbackPosition: nameDecision.fallbackPosition, value: form.name })
-  await wait(300)
-
-  if (form.repeating) {
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const repeatDecision = await decideAction(screenshot, pageState, 'Find and enable the repeating or recurring form toggle or checkbox')
-    if (repeatDecision.confidence >= 0.6) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: repeatDecision.targetLabel, targetRole: repeatDecision.targetRole, fallbackPosition: repeatDecision.fallbackPosition })
-      await wait(300)
-    }
-  }
-
-  const { success, escalation } = await saveAndVerify(tabId, step.stepId, step.inputRef, `Form named "${form.name}" appears under visit "${visitName}"`)
-  if (!success) return { outcome: 'escalated', action: 'createForm', reasoning: 'Save unconfirmed', escalation }
-
   return { outcome: 'success', action: 'createForm', reasoning: `Created form "${form.name}" under "${visitName}"` }
 }
 
 // ── addField ───────────────────────────────────────────────────────────────────
+
+function buildFieldGoal(field: Field, platformType: string): string {
+  const steps: string[] = [
+    `1. Click the element library tile labeled "${platformType}" to add a new field of this type`,
+    `2. In the Options panel, type "${field.label}" into the "Label" input (clear it first)`,
+  ]
+  let n = 3
+
+  if (field.required) {
+    steps.push(`${n}. Check the "Required" checkbox in the Options panel`)
+    n++
+  }
+
+  steps.push(`${n}. Click the "Save" button (NOT "Save As Template")`)
+  n++
+
+  if (field.options && field.options.length > 0) {
+    const pasteText = field.options.map((o) => `${o.code}=${o.label}`).join('\n')
+    steps.push(`${n}. Click the "${field.label}" card on the canvas to re-select it`)
+    n++
+    steps.push(`${n}. Type the following into the "Paste Values (replaces list)" textarea:\n${pasteText}`)
+    n++
+    steps.push(`${n}. Click the "Apply Pasted Values" button`)
+    n++
+    steps.push(`${n}. Click "Save"`)
+    n++
+  }
+
+  if (field.min !== undefined || field.max !== undefined || field.units) {
+    steps.push(`${n}. Click the "${field.label}" card on the canvas to re-select it`)
+    n++
+    if (field.min !== undefined) { steps.push(`${n}. Type "${field.min}" into the "Minimum" input`); n++ }
+    if (field.max !== undefined) { steps.push(`${n}. Type "${field.max}" into the "Maximum" input`); n++ }
+    if (field.units)             { steps.push(`${n}. Type "${field.units}" into the "Units" input`); n++ }
+    steps.push(`${n}. Click "Save"`)
+    n++
+  }
+
+  if (field.skip_logic) {
+    steps.push(`${n}. Click the "${field.label}" card on the canvas to re-select it`)
+    n++
+    steps.push(`${n}. Select "Visible When…" (or the conditional option) from the "Visibility" dropdown`)
+    n++
+    steps.push(`${n}. Select "${field.skip_logic.when_field_label}" from the "When Element" dropdown`)
+    n++
+    steps.push(`${n}. Type "${field.skip_logic.equals_value}" into the "Equals Value" input`)
+    n++
+    steps.push(`${n}. Click "Save"`)
+    n++
+  }
+
+  return steps.join('\n')
+}
 
 async function addField(tabId: number, step: BuildStep, vocabMap: VocabularyMap): Promise<StepResult> {
   const field = step.payload as Field
@@ -258,175 +238,47 @@ async function addField(tabId: number, step: BuildStep, vocabMap: VocabularyMap)
     }
   }
 
-  // ── 0. Navigate to the form builder ──────────────────────────────────────────
+  // ── Navigate (uses captureAndPerceive for screen detection) ───────────────────
   await navigateToFormBuilder(tabId, visitName, formName)
 
-  // Idempotency — check canvas for the field label after navigating to builder
+  // ── Idempotency check (no Gemini) ─────────────────────────────────────────────
   if (await existsOnScreen(tabId, field.label)) {
     return { outcome: 'skipped', action: 'addField', reasoning: `Field "${field.label}" already exists` }
   }
 
-  // ── 1. Add element by clicking the library item for the target type ───────────
-  // Clicking the library tile adds an element of the right type AND auto-selects it.
-  // This is the only safe approach — changing the type AFTER adding discards values/range.
-  let { screenshot, pageState } = await captureAndPerceive(tabId)
-  const libDecision = await decideAction(screenshot, pageState,
-    `Click the element library tile labeled exactly "${platformType}" in the element library panel to add a new field of this type`)
+  // ── Snapshot + plan all actions in ONE Gemini call ────────────────────────────
+  const { screenshot, rawState } = await getPageSnapshot(tabId)
+  const goal = buildFieldGoal(field, platformType)
+  const actions = await planActions(screenshot, rawState.controls, goal)
 
-  if (libDecision.confidence < 0.5) {
+  if (actions.length === 0) {
     return {
-      outcome: 'escalated', action: 'addField', reasoning: 'Library item not found',
+      outcome: 'escalated', action: 'addField', reasoning: 'planActions returned an empty sequence',
       escalation: {
-        id: `field_add_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
-        issue: `Could not locate "${platformType}" in the element library for field "${field.label}".`,
-        screenshot, bestGuess: libDecision.targetLabel, confidence: libDecision.confidence,
+        id: `plan_empty_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
+        issue: `Gemini returned no actions for field "${field.label}" (${platformType}). The screen may not show the form builder.`,
+        screenshot, bestGuess: 'Ensure the form builder is open and the element library is visible', confidence: 0.1,
       },
     }
   }
-  await sendInteract(tabId, { kind: 'click', targetLabel: libDecision.targetLabel, targetRole: libDecision.targetRole, fallbackPosition: libDecision.fallbackPosition })
-  await wait(700)
 
-  // ── 2. Label ──────────────────────────────────────────────────────────────────
-  ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-  const labelDecision = await decideAction(screenshot, pageState,
-    `Find the "Label" input in the Options panel on the right side and type "${field.label}"`)
-  await sendInteract(tabId, { kind: 'type', targetLabel: labelDecision.targetLabel, targetRole: labelDecision.targetRole, fallbackPosition: labelDecision.fallbackPosition, value: field.label })
-  await wait(300)
+  // ── Execute ───────────────────────────────────────────────────────────────────
+  await runPlan(tabId, actions)
+  await wait(800)
 
-  // ── 3. Required ───────────────────────────────────────────────────────────────
-  if (field.required) {
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const reqDecision = await decideAction(screenshot, pageState,
-      'Find and check the "Required" checkbox in the Options panel')
-    if (reqDecision.confidence >= 0.6) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: reqDecision.targetLabel, targetRole: reqDecision.targetRole, fallbackPosition: reqDecision.fallbackPosition })
-      await wait(300)
-    }
-  }
-
-  // ── 4. Save + verify the field exists on the canvas ──────────────────────────
-  const initialSave = await saveAndVerify(tabId, step.stepId, step.inputRef,
-    `A field labeled "${field.label}" of type "${platformType}" appears on the form canvas`)
-  if (!initialSave.success) return { outcome: 'escalated', action: 'addField', reasoning: 'Initial save failed', escalation: initialSave.escalation }
-
-  // ── 5. Coded values ───────────────────────────────────────────────────────────
-  // Use paste-values (one textarea + apply button) to enter all options at once.
-  // Safer than per-option clicking because we control the entire list in one shot.
-  if (field.options && field.options.length > 0) {
-    // Re-select the element on the canvas to show Options panel
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const reselD = await decideAction(screenshot, pageState,
-      `Click on the element card labeled "${field.label}" on the form canvas to select it and show its Options panel`)
-    if (reselD.confidence >= 0.5) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: reselD.targetLabel, targetRole: reselD.targetRole, fallbackPosition: reselD.fallbackPosition })
-      await wait(400)
-    }
-
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const pasteText = field.options.map((o) => `${o.code}=${o.label}`).join('\n')
-    const pasteAreaDecision = await decideAction(screenshot, pageState,
-      'Find the "Paste Values (replaces list)" textarea in the Values section of the Options panel')
-    await sendInteract(tabId, { kind: 'type', targetLabel: pasteAreaDecision.targetLabel, targetRole: pasteAreaDecision.targetRole, fallbackPosition: pasteAreaDecision.fallbackPosition, value: pasteText })
-    await wait(300)
-
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const applyDecision = await decideAction(screenshot, pageState,
-      'Click the "Apply Pasted Values" button to populate the coded-value list')
-    if (applyDecision.confidence >= 0.5) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: applyDecision.targetLabel, targetRole: applyDecision.targetRole, fallbackPosition: applyDecision.fallbackPosition })
-      await wait(400)
-    }
-
-    await saveAndVerify(tabId, step.stepId, step.inputRef, `Coded values saved for field "${field.label}"`)
-  }
-
-  // ── 6. Range (min / max / units) ──────────────────────────────────────────────
-  if (field.min !== undefined || field.max !== undefined) {
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const reselD = await decideAction(screenshot, pageState,
-      `Click on the element card labeled "${field.label}" on the canvas to select it`)
-    if (reselD.confidence >= 0.5) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: reselD.targetLabel, targetRole: reselD.targetRole, fallbackPosition: reselD.fallbackPosition })
-      await wait(400)
-      ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    }
-
-    if (field.min !== undefined) {
-      const minD = await decideAction(screenshot, pageState,
-        `Find the "Minimum" input in the Range Check section and enter ${field.min}`)
-      await sendInteract(tabId, { kind: 'type', targetLabel: minD.targetLabel, targetRole: minD.targetRole, fallbackPosition: minD.fallbackPosition, value: String(field.min) })
-    }
-    if (field.max !== undefined) {
-      const maxD = await decideAction(screenshot, pageState,
-        `Find the "Maximum" input in the Range Check section and enter ${field.max}`)
-      await sendInteract(tabId, { kind: 'type', targetLabel: maxD.targetLabel, targetRole: maxD.targetRole, fallbackPosition: maxD.fallbackPosition, value: String(field.max) })
-    }
-    if (field.units) {
-      const unitsD = await decideAction(screenshot, pageState,
-        `Find the "Units" input in the Range Check section and enter "${field.units}"`)
-      await sendInteract(tabId, { kind: 'type', targetLabel: unitsD.targetLabel, targetRole: unitsD.targetRole, fallbackPosition: unitsD.fallbackPosition, value: field.units })
-    }
-    await saveAndVerify(tabId, step.stepId, step.inputRef, `Range saved for field "${field.label}"`)
-  }
-
-  // ── 7. Skip logic / Element Visibility ────────────────────────────────────────
-  // Last — the target "when" field must already exist on the canvas.
-  if (field.skip_logic) {
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const reselD = await decideAction(screenshot, pageState,
-      `Click on the element card labeled "${field.label}" on the canvas to select it and see its Options panel`)
-    if (reselD.confidence >= 0.5) {
-      await sendInteract(tabId, { kind: 'click', targetLabel: reselD.targetLabel, targetRole: reselD.targetRole, fallbackPosition: reselD.fallbackPosition })
-      await wait(400)
-      ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    }
-
-    // Change visibility mode to "conditional / Visible When…"
-    const visD = await decideAction(screenshot, pageState,
-      'Find the "Visibility" dropdown in the Element Visibility section and select the "Visible When…" or conditional option')
-    if (visD.confidence < 0.5) {
-      return {
-        outcome: 'escalated', action: 'addField:skipLogic', reasoning: 'Visibility selector not found',
-        escalation: {
-          id: `skip_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
-          issue: `Could not find the Visibility selector for field "${field.label}". Rule: show when "${field.skip_logic.when_field_label}" = "${field.skip_logic.equals_value}".`,
-          screenshot, bestGuess: 'Visibility section not visible', confidence: visD.confidence,
-        },
-      }
-    }
-    await sendInteract(tabId, { kind: 'select', targetLabel: visD.targetLabel, targetRole: visD.targetRole, fallbackPosition: visD.fallbackPosition, value: 'when' })
-    await wait(500)
-
-    // Select the "when" field by its label text
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const whenD = await decideAction(screenshot, pageState,
-      `Find the "When Element" dropdown and select the element labeled "${field.skip_logic.when_field_label}"`)
-    await sendInteract(tabId, { kind: 'select', targetLabel: whenD.targetLabel, targetRole: whenD.targetRole, fallbackPosition: whenD.fallbackPosition, value: field.skip_logic.when_field_label })
-    await wait(400)
-
-    // Set the equals value
-    ;({ screenshot, pageState } = await captureAndPerceive(tabId))
-    const eqD = await decideAction(screenshot, pageState,
-      `Find the "Equals Value" input in the Element Visibility section and type "${field.skip_logic.equals_value}"`)
-    await sendInteract(tabId, { kind: 'type', targetLabel: eqD.targetLabel, targetRole: eqD.targetRole, fallbackPosition: eqD.fallbackPosition, value: field.skip_logic.equals_value })
-
-    await saveAndVerify(tabId, step.stepId, step.inputRef,
-      `Visibility condition saved: field "${field.label}" shows when "${field.skip_logic.when_field_label}" equals "${field.skip_logic.equals_value}"`)
-  }
-
-  // ── Final read-back: confirm label AND type survived ──────────────────────────
-  const { screenshot: finalShot } = await captureAndPerceive(tabId)
-  const readBack = await verifyOutcome(
+  // ── Verify (one final Gemini call) ────────────────────────────────────────────
+  const { screenshot: finalShot } = await getPageSnapshot(tabId)
+  const verify = await verifyOutcome(
     finalShot,
-    `The form canvas shows a field labeled exactly "${field.label}" with type "${platformType}"`,
+    `The form canvas shows a field labeled "${field.label}" with type "${platformType}"`,
   )
-  if (!readBack.success || readBack.confidence < 0.7) {
+  if (!verify.success || verify.confidence < 0.7) {
     return {
-      outcome: 'escalated', action: 'addField:readBack', reasoning: readBack.reason,
+      outcome: 'escalated', action: 'addField:verify', reasoning: verify.reason,
       escalation: {
         id: `readback_${step.stepId}`, stepId: step.stepId, inputRef: step.inputRef,
-        issue: `Field "${field.label}" read-back failed: ${readBack.reason}`,
-        screenshot: finalShot, bestGuess: 'Field may have wrong label or type', confidence: readBack.confidence,
+        issue: `Field "${field.label}" verification failed: ${verify.reason}`,
+        screenshot: finalShot, bestGuess: 'Field may have wrong label or type', confidence: verify.confidence,
       },
     }
   }

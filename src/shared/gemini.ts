@@ -2,9 +2,9 @@
 // Uses @google/genai v1.x (createPartFromBase64 / createPartFromText helpers).
 
 import { GoogleGenAI, createPartFromBase64, createPartFromText } from '@google/genai'
-import type { PageState, UIControl } from './types'
+import type { PageState, UIControl, InteractAction } from './types'
 
-const MODEL = 'gemini-2.5-flash'
+const MODEL = 'gemini-3.6-flash'
 
 // 15 RPM free tier = 1 call per 4 s minimum. We use 4.5 s to stay safe.
 const MIN_CALL_INTERVAL_MS = 4500
@@ -40,14 +40,29 @@ export async function callGeminiJSON<T>(
     ? [createPartFromBase64(screenshotBase64, 'image/png'), createPartFromText(userText)]
     : [createPartFromText(userText)]
 
-  const response = await client().models.generateContent({
-    model: MODEL,
-    contents: parts,
-    config: {
-      systemInstruction: systemPrompt,
-      responseMimeType: 'application/json',
-    },
-  })
+  let response
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 8000 * attempt))  // 8s, 16s, 24s
+    try {
+      response = await client().models.generateContent({
+        model: MODEL,
+        contents: parts,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+        },
+      })
+      break  // success
+    } catch (err) {
+      lastErr = err
+      const msg = String(err)
+      const isTransient = msg.includes('"code":503') || msg.includes('"code":429') || msg.includes('Failed to fetch') || msg.includes('NetworkError')
+      console.error(`[gemini] attempt ${attempt + 1} failed${isTransient ? ' (transient, will retry)' : ''}:`, msg.slice(0, 200))
+      if (!isTransient) throw err  // non-transient errors fail immediately
+    }
+  }
+  if (!response) throw lastErr
 
   const raw = response.text ?? ''
   // Strip markdown fences if model ignores responseMimeType
@@ -204,6 +219,61 @@ Return JSON:
     userText,
     dataUrlToBase64(screenshotDataUrl),
   )
+}
+
+// ── One-shot action planner ────────────────────────────────────────────────────
+// Single Gemini call returns the complete sequence of UI actions for a goal.
+// Eliminates the per-sub-action perceive→decide loop.
+
+const PLAN_SYSTEM = `
+You are controlling a clinical eSource web application to build a study structure.
+Given the current screenshot and visible controls, return ALL UI interactions needed
+to accomplish the goal in a single ordered sequence.
+
+Platform UI facts (controls that appear predictably — plan ahead for them):
+- Element library panel (always visible in form builder): buttons/tiles for each field type
+- Options panel (appears when a canvas element is selected): inputs labeled exactly:
+    "Label" (text input), "Required" (checkbox),
+    "Minimum", "Maximum", "Units" (numeric range inputs),
+    "Visibility" (dropdown — options include "Always Visible" and "Visible When…"),
+    "When Element" (dropdown, only after Visibility = "Visible When…"),
+    "Equals Value" (text input, only after Visibility = "Visible When…"),
+    "Paste Values (replaces list)" (textarea — for coded-value field types),
+    "Apply Pasted Values" (button)
+- Canvas: clicking a field card on the canvas selects it and shows its Options panel
+- Save row: "Save" button (primary — always use this), "Save As Template" (never use this)
+
+Return ONLY a JSON array — no markdown, no explanation:
+[
+  {
+    "kind": "click" | "type" | "select" | "clear",
+    "targetLabel": "<label from controls list, or known platform label if not yet visible>",
+    "targetRole": "<button | input | select | checkbox | any>",
+    "value": "<for type/select only — omit for click/clear>",
+    "fallbackPosition": {"x": 0, "y": 0}
+  }
+]
+`.trim()
+
+export async function planActions(
+  screenshotDataUrl: string,
+  controls: UIControl[],
+  goal: string,
+): Promise<InteractAction[]> {
+  const controlsList = a11yTreeToText(controls)
+  const userText = `Current controls:\n${controlsList}\n\nGoal — complete EVERY listed step:\n${goal}`
+  return callGeminiJSON<InteractAction[]>(PLAN_SYSTEM, userText, dataUrlToBase64(screenshotDataUrl))
+}
+
+// ── API key validation ─────────────────────────────────────────────────────────
+// Makes a minimal call so START_RUN can surface auth errors immediately.
+
+export async function validateApiKey(): Promise<void> {
+  await client().models.generateContent({
+    model: MODEL,
+    contents: [createPartFromText('Reply with the single word: ok')],
+    config: { responseMimeType: 'text/plain' },
+  })
 }
 
 // ── Post-action verification ────────────────────────────────────────────────────

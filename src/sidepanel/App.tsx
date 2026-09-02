@@ -105,7 +105,7 @@ export default function App() {
 
       {/* Progress (compact step list) */}
       {plan.length > 0 && status !== 'idle' && (
-        <StepList plan={run.plan} currentIndex={currentStepIndex} />
+        <StepList plan={run.plan} currentIndex={currentStepIndex} traceLog={traceLog} />
       )}
 
       {status === 'complete' && <p style={{ color: 'green', marginTop: 8 }}>✓ Run complete</p>}
@@ -144,7 +144,7 @@ function EscalationCard({ item, onResolve }: { item: EscalationItem; onResolve: 
 
 // ── Compact step list ──────────────────────────────────────────────────────────
 
-function StepList({ plan, currentIndex }: { plan: RunState['plan']; currentIndex: number }) {
+function StepList({ plan, currentIndex, traceLog }: { plan: RunState['plan']; currentIndex: number; traceLog: RunState['traceLog'] }) {
   const visible = plan.slice(Math.max(0, currentIndex - 3), currentIndex + 8)
 
   function retryStep(stepId: string) {
@@ -158,11 +158,18 @@ function StepList({ plan, currentIndex }: { plan: RunState['plan']; currentIndex
         const color = step.status === 'done' ? '#16a34a' : step.status === 'escalated' ? '#d97706' : step.status === 'failed' ? '#dc2626' : step.status === 'in_progress' ? '#2563eb' : '#999'
         const payload = step.payload as { name?: string; label?: string }
         const name = payload.label ?? payload.name ?? step.type
+        const traceEntry = [...traceLog].reverse().find((t) => t.stepId === step.stepId)
+        const errorTip = step.status === 'failed' && traceEntry ? traceEntry.reasoning : undefined
         return (
-          <div key={step.stepId + i} style={{ display: 'flex', gap: 5, padding: '1px 0', alignItems: 'center' }}>
+          <div key={step.stepId + i} title={errorTip} style={{ display: 'flex', gap: 5, padding: '1px 0', alignItems: 'center' }}>
             <span style={{ color, width: 12, flexShrink: 0 }}>{icon}</span>
             <span style={{ color: '#888', width: 36, flexShrink: 0 }}>{step.type}</span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{name}</span>
+            {errorTip && (
+              <span style={{ color: '#dc2626', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120, flexShrink: 0 }} title={errorTip}>
+                {errorTip.slice(0, 60)}
+              </span>
+            )}
             {step.status === 'failed' && (
               <button
                 onClick={() => retryStep(step.stepId)}

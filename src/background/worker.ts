@@ -6,7 +6,7 @@ import type { ExtMessage, RunState, EscalationItem, VocabularyMap } from '../sha
 import { validateIR, createRunState, IRValidationError } from '../shared/planner'
 import { initGemini } from '../shared/gemini'
 import { loadCachedVocabulary, cacheVocabulary, buildVocabularyResult } from '../shared/vocabulary'
-import { discoverVocabulary, decideAction } from '../shared/gemini'
+import { discoverVocabulary, decideAction, validateApiKey } from '../shared/gemini'
 import { captureAndPerceive, sendInteract, wait } from './helpers'
 import { executeStep } from './executor'
 
@@ -222,6 +222,19 @@ async function handleMessage(message: ExtMessage): Promise<unknown> {
       }
 
       initGemini(apiKey)
+
+      try {
+        await validateApiKey()
+      } catch (err) {
+        const msg = String(err)
+        // 503 = model overloaded (transient) — not a key problem, proceed anyway
+        if (!msg.includes('"code":503') && !msg.includes('"code":429') && !msg.includes('Failed to fetch') && !msg.includes('NetworkError')) {
+          await setState({ status: 'error', plan: [], currentStepIndex: 0, escalationQueue: [], traceLog: [], errorMessage: `Gemini API key rejected: ${msg}` })
+          return null
+        }
+        console.warn('[worker] Gemini returned transient error during key check — proceeding:', msg.slice(0, 120))
+      }
+
       const tab = await chrome.tabs.get(message.tabId)
       const hostname = tab.url ? new URL(tab.url).hostname : 'unknown'
 

@@ -158,6 +158,12 @@ async function performInteraction(action: InteractAction): Promise<{ success: bo
 }
 
 // ── Message listener ───────────────────────────────────────────────────────────
+// Guard against double-injection (happens when extension reloads while tab is open
+// and the background then re-injects the script programmatically).
+if ((window as unknown as Record<string, unknown>)['__sb_loaded']) {
+  // Already running — skip re-registration
+} else {
+  (window as unknown as Record<string, unknown>)['__sb_loaded'] = true
 
 chrome.runtime.onMessage.addListener((message: ExtMessage, _sender, sendResponse) => {
   if (message.type === 'GET_PAGE_STATE') {
@@ -171,3 +177,5 @@ chrome.runtime.onMessage.addListener((message: ExtMessage, _sender, sendResponse
     return true
   }
 })
+
+} // end __sb_loaded guard
